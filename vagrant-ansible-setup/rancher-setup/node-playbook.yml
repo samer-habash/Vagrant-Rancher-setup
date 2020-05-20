@@ -1,0 +1,209 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - name: Update apt repo and cache on all Debian/Ubuntu boxes
+    apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+
+#  - name: Upgrade all packages on servers
+#    apt: upgrade=dist force_apt_get=yes
+
+  - name: Install packages that allow apt to be used over HTTPS
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - ntp
+
+  - name: Add an apt signing key for Docker
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add apt repository for stable version
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable
+      state: present
+
+  - name: Install docker and its dependecies
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    notify:
+      - docker status
+
+  - name: reload docker
+    systemd:
+      state: restarted
+      daemon_reload: yes
+      name: docker
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Add an apt signing key for Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Adding apt repository for Kubernetes
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install Kubectl binaries
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubectl
+
+  - name: Enable Password Authentication via ssh
+    lineinfile:
+      dest=/etc/ssh/sshd_config
+      regexp='^PasswordAuthentication'
+      line="PasswordAuthentication yes"
+      state=present
+      backup=yes
+
+  - name: adding user rke to group docker
+    user:
+      name: rke
+      password: "{{ 'rke' | password_hash('sha512') }}"
+      groups: docker
+      append: yes
+
+  - name: Creates directory .ssh for user rke
+    become_user: rke
+    file:
+      path: /home/rke/.ssh
+      state: directory
+      mode: 0755
+
+###############################################################
+    # Working on local machine to make ssh keys and so on
+##############################################################
+
+  - name: Creates authorized_key file
+    file:
+      path: /home/rke/.ssh/authorized_keys
+      state: touch
+      mode: 0755
+
+  - name: current user in local machine
+    local_action: shell echo $HOME
+    register: home_user_local
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: current working directory on local machine
+    local_action: shell pwd
+    register: cwd_local
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: Check if sshkey has been already created
+    local_action:
+      module: stat
+      path: "{{ home_user_local.stdout }}/.ssh/rancher-nodes.pub"
+    register: stat_rancher_sshkey_nodes
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: Generate ssh-key on host/worker machine
+    local_action:
+      module : openssh_keypair
+      path: "{{ home_user_local.stdout }}/.ssh/rancher-nodes"
+    when: stat_rancher_sshkey_nodes.stat.exists == false
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: chmod for key
+    local_action:
+      module: file
+      path: "{{ home_user_local.stdout }}/.ssh/rancher-nodes"
+      mode: 400
+    when: stat_rancher_sshkey_nodes.stat.exists == false
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: chmod for pub key
+    local_action:
+      module: file
+      path: "{{ home_user_local.stdout }}/.ssh/rancher-nodes.pub"
+      mode: 400
+    when: stat_rancher_sshkey_nodes.stat.exists == false
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: Check if rancher binary downloaded an exists
+    local_action:
+      module: stat
+      path: "{{ cwd_local.stdout }}/rke_linux-amd64"
+    register: stat_rancher_binary
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: install rancher to local file
+   # URL Rancher is for Linux host/worker machines only - Please replace your URL with your matching OS machine .
+    local_action:
+      module: get_url
+      url: "https://github.com/rancher/rke/releases/download/v0.2.10/rke_linux-amd64"
+      dest: "{{ cwd_local.stdout }}/rke_linux-amd64"
+    when: stat_rancher_binary.stat.exists == false
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: change name of rke
+    local_action:
+      module: copy
+      src: "{{ cwd_local.stdout }}/rke_linux-amd64"
+      dest: "/usr/local/bin/rke"
+      mode: 0755
+    when: stat_rancher_binary.stat.exists == false
+    become: false
+    delegate_to: 127.0.0.1
+
+  - name: Deploy SSH Key to nodes
+    authorized_key: user=rke
+      key="{{ lookup('file', '{{ home_user_local.stdout }}/.ssh/rancher-nodes') }}"
+      state=present
+    when: stat_rancher_sshkey_nodes.stat.exists == true
+
+  handlers:
+    - name: docker status
+      service: name=docker state=started
+
+    - name: kubectl status
+      service: name=kubectl state=started
+
+    - name: restart ssh
+      service: name=sshd state=restarted
+
+
