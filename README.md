@@ -4,7 +4,7 @@
 
 - The setup is working on virtualbox v5.2 with vagrant v2
 
-- The setup is about 85% completed , and it is under testing to fully optimize the setup.
+- The setup is about 70% completed , and it is under testing to fully optimize the setup.
 
 - The setup takes form multiple newest installtion resources.
 
